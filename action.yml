@@ -1,0 +1,225 @@
+name: "Shannon AI Pentest"
+description: "AI penetration testing in CI — scan a running target, report exploitable vulnerabilities as SARIF, and gate the build on severity."
+author: "Keygraph"
+
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  api-key:
+    description: "Anthropic API key. Store it as an encrypted secret and pass it here; the action exports it as ANTHROPIC_API_KEY internally."
+    required: true
+  target-url:
+    description: "URL of the running target to scan (e.g. your staging or preview deployment for this commit)."
+    required: true
+  repo-path:
+    description: "Path to the checked-out source, used for whitebox analysis. Run actions/checkout first."
+    required: false
+    default: "."
+  config-path:
+    description: "Path to a committed Shannon config (YAML), passed to the CLI with -c. If it does not exist, the scan runs at MAX scope (all vuln classes)."
+    required: false
+    default: ".shannon/ci.yml"
+  fail-on:
+    description: "Fail the job when any finding is at or above this severity: none | info | low | medium | high | critical."
+    required: false
+    default: "none"
+  pipeline-testing:
+    description: "Run a fast smoke test with minimal prompts (no real analysis). For validating pipeline wiring only."
+    required: false
+    default: "false"
+  upload-sarif:
+    description: "Upload findings to GitHub code scanning as SARIF. Requires 'security-events: write' permission on the job."
+    required: false
+    default: "true"
+  comment-pr:
+    description: "Post or update a findings-summary comment on the pull request. Requires 'pull-requests: write' and a pull_request event."
+    required: false
+    default: "false"
+  workspace:
+    description: "Scan workspace name. Defaults to ci-<run_id>."
+    required: false
+    default: ""
+  artifact-name:
+    description: "Name of the uploaded report artifact."
+    required: false
+    default: "shannon-report"
+  shannon-version:
+    description: "Version or npm dist-tag of @keygraph/shannon to run."
+    required: false
+    default: "latest"
+
+outputs:
+  result:
+    description: "Scan outcome: completed | failed."
+    value: ${{ steps.analyze.outputs.result }}
+  findings-count:
+    description: "Total number of findings."
+    value: ${{ steps.analyze.outputs.findings-count }}
+  blocking-count:
+    description: "Number of findings at or above fail-on."
+    value: ${{ steps.analyze.outputs.blocking-count }}
+  highest-severity:
+    description: "Highest severity found (none if clean)."
+    value: ${{ steps.analyze.outputs.highest-severity }}
+  report-path:
+    description: "Path to the human-readable Markdown report."
+    value: ${{ steps.analyze.outputs.report-path }}
+  report-json:
+    description: "Path to the machine-readable report.json."
+    value: ${{ steps.analyze.outputs.report-json }}
+  sarif-path:
+    description: "Path to the generated SARIF file."
+    value: ${{ steps.analyze.outputs.sarif-path }}
+
+runs:
+  using: "composite"
+  steps:
+    # NOTE: nested actions are pinned by major tag for readability. For a hardened
+    # release, pin each to a full commit SHA.
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: Validate inputs
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api-key }}
+      run: |
+        set -euo pipefail
+        if [ -z "${API_KEY}" ]; then
+          echo "::error::api-key is empty. Pass your Anthropic API key from a repository secret."
+          exit 1
+        fi
+        case "${{ inputs.fail-on }}" in
+          none|info|low|medium|high|critical) : ;;
+          *) echo "::error::fail-on must be one of none|info|low|medium|high|critical"; exit 1 ;;
+        esac
+
+    - name: Launch scan
+      id: launch
+      shell: bash
+      env:
+        # The CLI reads ONLY this variable name; the source secret can be named anything.
+        ANTHROPIC_API_KEY: ${{ inputs.api-key }}
+      run: |
+        set -euo pipefail
+        WS="${{ inputs.workspace }}"
+        [ -z "$WS" ] && WS="ci-${GITHUB_RUN_ID}"
+        echo "SHANNON_WS=$WS" >> "$GITHUB_ENV"
+        echo "SHANNON_RUN_DIR=$HOME/.shannon/workspaces/$WS" >> "$GITHUB_ENV"
+
+        REPO="$(cd "${{ inputs.repo-path }}" && pwd)"
+
+        FLAGS=()
+        [ "${{ inputs.pipeline-testing }}" = "true" ] && FLAGS+=(--pipeline-testing)
+
+        CONFIG="${{ inputs.config-path }}"
+        if [ -n "$CONFIG" ]; then
+          case "$CONFIG" in /*) : ;; *) CONFIG="$GITHUB_WORKSPACE/$CONFIG" ;; esac
+          if [ -f "$CONFIG" ]; then
+            FLAGS+=(-c "$CONFIG")
+            echo "Using Shannon config: $CONFIG"
+          else
+            echo "::warning::No Shannon config at $CONFIG — running at MAX scope (all vuln classes, exploitation on). Commit a .shannon/ci.yml to scope and speed up scans."
+          fi
+        fi
+
+        echo "Scanning ${{ inputs.target-url }} (flags: ${FLAGS[*]:-<full scan>})"
+        npx --yes "@keygraph/shannon@${{ inputs.shannon-version }}" start \
+          -u "${{ inputs.target-url }}" \
+          -r "$REPO" \
+          -w "$WS" \
+          "${FLAGS[@]}"
+
+    - name: Wait for completion
+      shell: bash
+      run: |
+        set -euo pipefail
+        # `start` is detached and returns early; `shannon logs` can hang in CI (its file
+        # watcher misses the ephemeral container's final write). Poll the log directly.
+        LOG=""
+        for i in $(seq 1 60); do
+          LOG=$(find "$SHANNON_RUN_DIR" -name workflow.log 2>/dev/null | head -1)
+          [ -n "$LOG" ] && break
+          sleep 2
+        done
+        [ -n "${LOG:-}" ] || { echo "::error::scan never registered (no workflow.log)"; exit 1; }
+        echo "SHANNON_LOG=$LOG" >> "$GITHUB_ENV"
+        tail -n +1 -f "$LOG" & TAIL=$!
+        for i in $(seq 1 690); do   # ~115 min cap
+          grep -qE '^Scan (COMPLETED|FAILED)$' "$LOG" && break
+          sleep 10
+        done
+        kill "$TAIL" 2>/dev/null || true
+        grep -qE '^Scan (COMPLETED|FAILED)$' "$LOG" || { echo "::error::timed out waiting for the scan to finish"; exit 1; }
+
+    - name: Analyze results
+      id: analyze
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -z "${SHANNON_RUN_DIR:-}" ]; then
+          echo "::warning::scan did not start; nothing to analyze"
+          echo "result=failed" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        node "${{ github.action_path }}/scripts/postprocess.mjs" \
+          "$SHANNON_RUN_DIR" "${{ inputs.fail-on }}" "$RUNNER_TEMP/shannon.sarif"
+
+    - name: Upload SARIF to code scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.analyze.outputs.sarif-path != '' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.analyze.outputs.sarif-path }}
+
+    - name: Comment on the pull request
+      if: ${{ always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request' }}
+      continue-on-error: true
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const file = `${process.env.RUNNER_TEMP}/shannon-comment.md`;
+          if (!fs.existsSync(file)) return;
+          const body = fs.readFileSync(file, 'utf8');
+          const marker = '<!-- shannon-action -->';
+          const { data: comments } = await github.rest.issues.listComments({
+            ...context.repo, issue_number: context.issue.number, per_page: 100,
+          });
+          const existing = comments.find((c) => c.body && c.body.includes(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+          } else {
+            await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+          }
+
+    - name: Upload report artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ env.SHANNON_RUN_DIR }}
+        include-hidden-files: true
+        if-no-files-found: warn
+
+    - name: Enforce gate
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        RESULT="${{ steps.analyze.outputs.result }}"
+        BLOCKING="${{ steps.analyze.outputs.blocking-count }}"
+        if [ "$RESULT" = "failed" ]; then
+          echo "::error::Shannon scan FAILED — see the workflow.log in the ${{ inputs.artifact-name }} artifact."
+          exit 1
+        fi
+        if [ "${{ inputs.fail-on }}" != "none" ] && [ "${BLOCKING:-0}" -gt 0 ]; then
+          echo "::error::${BLOCKING} finding(s) at or above severity '${{ inputs.fail-on }}'."
+          exit 1
+        fi
+        echo "Gate passed (result=${RESULT:-unknown}, blocking=${BLOCKING:-0})."

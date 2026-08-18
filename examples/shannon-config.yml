@@ -1,0 +1,38 @@
+# Example Shannon config — commit this to YOUR repo (e.g. as .shannon/ci.yml) and
+# point the action at it with `config-path`. It scopes and steers the scan.
+#
+# Do NOT put secrets here: this file is not environment-interpolated. Inject auth
+# credentials at runtime instead. See the Shannon configuration reference:
+#   https://github.com/KeygraphHQ/shannon
+
+# Which vulnerability classes to test. A subset keeps PR runs fast/cheap.
+vuln_classes: [injection, xss, authz]
+
+# Whether to attempt exploitation of confirmed vulnerabilities.
+exploit: false
+
+# Free-form engagement rules the agent must respect.
+rules_of_engagement: |
+  Read-only probing. Do not exercise payment, delete, or email-send endpoints.
+  Do not attempt destructive or denial-of-service techniques.
+
+# Steer effort toward (focus) or away from (avoid) parts of the codebase.
+rules:
+  focus:
+    - "[GLOB] src/api/**"
+  avoid:
+    - "[GLOB] src/legacy/**"
+    - "[GLOB] **/vendor/**"
+
+# Trim the final report to what a reviewer must act on.
+report:
+  min_severity: high
+  min_confidence: medium
+
+# For authenticated targets, describe the login flow. Reference credentials that
+# your workflow injects at runtime — never commit real secrets here.
+# authentication:
+#   type: form
+#   login_url: https://staging.example.com/login
+#   username: ci-scanner@example.com
+#   # password: <injected at runtime>

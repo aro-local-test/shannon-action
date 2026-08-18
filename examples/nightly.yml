@@ -1,0 +1,27 @@
+# Nightly full scan (all vulnerability classes, exploitation enabled) against staging.
+# Broader and slower than the PR scan; blocks on High+.
+
+name: Shannon Pentest (nightly)
+
+on:
+  schedule:
+    - cron: "0 3 * * *"     # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  pentest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: KeygraphHQ/shannon-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          target-url: https://staging.example.com
+          config-path: .shannon/nightly.yml   # all classes, exploit: true
+          fail-on: high

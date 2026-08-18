@@ -1,0 +1,32 @@
+# Scan a per-PR preview deployment, upload to the Security tab, comment inline,
+# and block the merge only on Critical findings.
+#
+# Assumes a prior job/step deploys this commit and exposes its URL. Replace
+# `needs.deploy.outputs.url` with however you surface your preview URL.
+
+name: Shannon Pentest (PR)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write   # SARIF -> Security tab
+  pull-requests: write     # inline PR comment
+
+jobs:
+  pentest:
+    # Secrets are not available to forked PRs — skip there.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: KeygraphHQ/shannon-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          target-url: https://pr-${{ github.event.number }}.preview.example.com
+          config-path: .shannon/ci.yml   # scoped, exploit: false — fast PR runs
+          fail-on: critical
+          comment-pr: true
