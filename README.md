@@ -20,7 +20,7 @@ On each run the action:
 ## Prerequisites
 
 - **A GitHub‑hosted runner** (`ubuntu-latest`) or a self‑hosted runner **with Docker available** — Shannon runs its engine in containers.
-- **An Anthropic API key**, stored as an encrypted repository/organization **secret**.
+- **An AI provider API key** — Anthropic by default; OpenAI, xAI, Bedrock, or a custom OpenAI‑compatible endpoint via the `model` input — stored as an encrypted repository/organization **secret**.
 - **A running target URL** to scan (e.g. a staging or per‑commit preview deployment).
 - **A committed Shannon config** at `.shannon/ci.yml` (recommended — without it, every run is a full max‑scope scan).
 
@@ -45,9 +45,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: KeygraphHQ/shannon-action@v1
         with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          api-key: ${{ secrets.SHANNON_AI_API_KEY }}
           target-url: ${{ inputs.target_url }}
           fail-on: critical      # fail the build only on Critical findings
+          # model: anthropic:claude-sonnet-4-6   # optional — <provider>:<model-id>
 ```
 
 ## Where the findings show up
@@ -93,7 +94,8 @@ See the [Shannon configuration reference](https://github.com/KeygraphHQ/shannon)
 
 | Input | Required | Default | Description |
 |---|:--:|---|---|
-| `api-key` | ✅ | — | Anthropic API key. Pass from a secret; exported internally as `ANTHROPIC_API_KEY`. |
+| `api-key` | ✅ | — | AI provider API key. Pass from a secret; exported internally as `SHANNON_AI_API_KEY` (provider‑neutral). |
+| `model` |  | Shannon default | Model as `<provider>:<model-id>` (e.g. `anthropic:claude-sonnet-4-6`, `openai:gpt-…`, `xai:…`). Exported as `SHANNON_AI_MODEL`. |
 | `target-url` | ✅ | — | URL of the running target to scan. |
 | `repo-path` |  | `.` | Checked‑out source for whitebox analysis. Run `actions/checkout` first. |
 | `config-path` |  | `.shannon/ci.yml` | Path to the committed Shannon config. Missing file → max‑scope scan (with a warning). |
@@ -138,7 +140,7 @@ permissions:
 # nightly, broader scope
 - uses: KeygraphHQ/shannon-action@v1
   with:
-    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    api-key: ${{ secrets.SHANNON_AI_API_KEY }}
     target-url: https://staging.example.com
     config-path: .shannon/nightly.yml   # all classes, exploit: true
     fail-on: high
@@ -159,7 +161,7 @@ Shannon sends application source and observed traffic context to an LLM (Anthrop
 
 ## How it works (under the hood)
 
-The action wraps the `@keygraph/shannon` CLI and handles the CI‑specific details for you: it maps your secret to the `ANTHROPIC_API_KEY` variable the CLI expects, waits for completion by polling the run log directly (robust in ephemeral CI environments), converts `report.json` into SARIF, and separates "scan failed" from "findings found" so gating is accurate.
+The action wraps the `@keygraph/shannon` CLI and handles the CI‑specific details for you: it exports your key as `SHANNON_AI_API_KEY` (the CLI's provider‑neutral credential) plus optional `SHANNON_AI_MODEL`, waits for completion by polling the run log directly (robust in ephemeral CI environments, where `shannon logs -f` can hang), converts `report.json` into SARIF, and separates "scan failed" from "findings found" so gating is accurate.
 
 ## License
 

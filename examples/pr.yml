@@ -25,7 +25,7 @@ jobs:
 
       - uses: KeygraphHQ/shannon-action@v1
         with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          api-key: ${{ secrets.SHANNON_AI_API_KEY }}
           target-url: https://pr-${{ github.event.number }}.preview.example.com
           config-path: .shannon/ci.yml   # scoped, exploit: false — fast PR runs
           fail-on: critical

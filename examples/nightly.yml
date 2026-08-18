@@ -21,7 +21,7 @@ jobs:
 
       - uses: KeygraphHQ/shannon-action@v1
         with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          api-key: ${{ secrets.SHANNON_AI_API_KEY }}
           target-url: https://staging.example.com
           config-path: .shannon/nightly.yml   # all classes, exploit: true
           fail-on: high

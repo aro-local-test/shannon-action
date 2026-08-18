@@ -8,8 +8,12 @@ branding:
 
 inputs:
   api-key:
-    description: "Anthropic API key. Store it as an encrypted secret and pass it here; the action exports it as ANTHROPIC_API_KEY internally."
+    description: "AI provider API key. Store it as an encrypted secret and pass it here; the action exports it as SHANNON_AI_API_KEY (provider-neutral) internally."
     required: true
+  model:
+    description: "Model to use, as '<provider>:<model-id>' (e.g. anthropic:claude-sonnet-4-6, openai:gpt-..., xai:...). Exported as SHANNON_AI_MODEL. Leave empty for Shannon's default."
+    required: false
+    default: ""
   target-url:
     description: "URL of the running target to scan (e.g. your staging or preview deployment for this commit)."
     required: true
@@ -102,8 +106,10 @@ runs:
       id: launch
       shell: bash
       env:
-        # The CLI reads ONLY this variable name; the source secret can be named anything.
-        ANTHROPIC_API_KEY: ${{ inputs.api-key }}
+        # Provider-neutral credentials. SHANNON_AI_API_KEY works for any provider;
+        # SHANNON_AI_MODEL (<provider>:<model-id>) selects it (empty -> Shannon's default).
+        SHANNON_AI_API_KEY: ${{ inputs.api-key }}
+        SHANNON_AI_MODEL: ${{ inputs.model }}
       run: |
         set -euo pipefail
         WS="${{ inputs.workspace }}"
@@ -138,8 +144,9 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # `start` is detached and returns early; `shannon logs` can hang in CI (its file
-        # watcher misses the ephemeral container's final write). Poll the log directly.
+        # `start` is detached and returns early. Interactively you would follow with
+        # `shannon logs <ws> -f` (or `start --follow`), but that file-watcher can hang in
+        # CI (it misses the ephemeral container's final write). Poll the log directly.
         LOG=""
         for i in $(seq 1 60); do
           LOG=$(find "$SHANNON_RUN_DIR" -name workflow.log 2>/dev/null | head -1)
