@@ -67,21 +67,25 @@ Commit a Shannon config to your repo and the action passes it with `-c`. This sc
 ```yaml
 # .shannon/ci.yml
 vuln_classes: [injection, xss, authz]   # subset keeps PR runs fast; widen for nightly
-exploit: false                          # analysis-only on PRs
+exploit: "false"                        # string, not boolean; "false" = analysis only
 
 rules_of_engagement: |
   Read-only probing. Do not exercise payment, delete, or email-send endpoints.
 
+# Each rule is { type, value, description? }.
+# type ∈ url_path | subdomain | domain | method | header | parameter | code_path
 rules:
   focus:
-    - "[GLOB] src/api/**"
+    - { type: code_path, value: "src/api/**", description: "The API surface" }
   avoid:
-    - "[GLOB] src/legacy/**"
+    - { type: code_path, value: "**/vendor/**", description: "Third-party code" }
 
 report:
-  min_severity: high
+  min_severity: high                    # low | medium | high | critical
   min_confidence: medium
 ```
+
+See [`examples/shannon-config.yml`](examples/shannon-config.yml) for a complete, annotated config (authentication, `code_path` globs, report filters).
 
 See the [Shannon configuration reference](https://github.com/KeygraphHQ/shannon) for the full schema (authentication, MFA/TOTP, focus/avoid paths, report filters).
 

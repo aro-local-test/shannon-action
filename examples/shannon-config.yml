@@ -1,38 +1,74 @@
 # Example Shannon config — commit this to YOUR repo (e.g. as .shannon/ci.yml) and
-# point the action at it with `config-path`. It scopes and steers the scan.
+# point the action at it with `config-path`. It scopes and steers the scan so CI
+# runs are fast, cheap, and repeatable.
 #
-# Do NOT put secrets here: this file is not environment-interpolated. Inject auth
-# credentials at runtime instead. See the Shannon configuration reference:
-#   https://github.com/KeygraphHQ/shannon
+# Full schema: apps/worker/configs/config-schema.json in KeygraphHQ/shannon.
+# Secrets note: Shannon does NOT expand ${ENV} in this file. Commit only non-secret
+# scoping here; inject auth credentials at runtime (see the authentication block).
 
-# Which vulnerability classes to test. A subset keeps PR runs fast/cheap.
+# Optional free-text description of the target (max 500 chars).
+description: "Storefront web + API, staging environment."
+
+# Which vulnerability classes to run. Default: all five.
+# Options: injection | xss | auth | authz | ssrf
 vuln_classes: [injection, xss, authz]
 
-# Whether to attempt exploitation of confirmed vulnerabilities.
-exploit: false
+# Run the exploitation phase? NOTE: this is a STRING, not a boolean.
+#   "false" = analysis only  (faster / cheaper — good default for PRs)
+#   "true"  = attempt exploits on confirmed findings
+exploit: "false"
 
-# Free-form engagement rules the agent must respect.
+# Free-form engagement rules applied to the analysis and exploitation agents.
 rules_of_engagement: |
   Read-only probing. Do not exercise payment, delete, or email-send endpoints.
-  Do not attempt destructive or denial-of-service techniques.
+  Throttle to under 5 requests/second per endpoint; back off 60s on any 429.
+  Use placeholders like [order_id] in deliverables, never real values.
 
-# Steer effort toward (focus) or away from (avoid) parts of the codebase.
+# Scope the scan. Each entry is { type, value, description? }; type and value are required.
+#   type ∈ url_path | subdomain | domain | method | header | parameter | code_path
+# For source code, use type: code_path with a repo-relative path OR glob in `value`
+# (glob: * = any run of chars, ** = any depth, ? = one char).
 rules:
-  focus:
-    - "[GLOB] src/api/**"
   avoid:
-    - "[GLOB] src/legacy/**"
-    - "[GLOB] **/vendor/**"
+    - description: "Skip logout"
+      type: url_path
+      value: "/logout"
+    - description: "Third-party / vendored code"
+      type: code_path
+      value: "**/vendor/**"
+  focus:
+    - description: "The API surface that matters most"
+      type: code_path
+      value: "src/api/**"                 # everything under src/api, any depth
+    - description: "User-profile endpoints"
+      type: url_path
+      value: "/api/v2/user-profile"
 
-# Trim the final report to what a reviewer must act on.
+# Filters the report agent applies when assembling the final report.
 report:
-  min_severity: high
-  min_confidence: medium
+  min_severity: high                       # low | medium | high | critical
+  min_confidence: medium                   # low | medium | high
+  # sarif: "true"                          # emit a native SARIF log — requires exploit: "true"
+  # guidance: |
+  #   Drop findings about missing security headers and rate-limit gaps.
 
-# For authenticated targets, describe the login flow. Reference credentials that
-# your workflow injects at runtime — never commit real secrets here.
+# Authenticated targets: describe the login flow so Shannon can reach protected pages.
+# Shannon does NOT interpolate ${ENV} here, so do not commit real credentials.
+# Instead, have your workflow generate the final config at runtime with the secret
+# substituted in (e.g. `envsubst` from a template, or append this block), then pass
+# that generated file via `config-path`.
+#
 # authentication:
-#   type: form
-#   login_url: https://staging.example.com/login
-#   username: ci-scanner@example.com
-#   # password: <injected at runtime>
+#   login_type: form                       # form | sso | api | basic
+#   login_url: "https://staging.example.com/login"
+#   credentials:
+#     username: "ci-scanner@example.com"
+#     password: "REPLACED_AT_RUNTIME"      # inject from a secret; never commit
+#     totp_secret: "JBSWY3DPEHPK3PXP"      # optional, for TOTP 2FA
+#   login_flow:
+#     - "Type $username into the email field"
+#     - "Type $password into the password field"
+#     - "Click 'Sign In'"
+#   success_condition:
+#     type: url_contains                   # url_contains | element_present | url_equals_exactly | text_contains
+#     value: "/dashboard"
