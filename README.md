@@ -61,6 +61,23 @@ jobs:
 | **Report artifact** | Always uploaded — the full Markdown report, `report.json`, per‑agent logs, and evidence. |
 | **Build status** | Set `fail-on` to fail the job on findings at/above a severity. |
 
+## Gating
+
+The job fails on **two independent conditions**:
+
+1. **The scan didn't complete.** The scan runs with `--follow`, so the step blocks until the scan finishes and exits non‑zero if the scan itself failed (an infrastructure or agent error — not findings). This fails the job automatically; nothing to configure.
+2. **Findings meet your threshold.** Set `fail-on` to `low` / `medium` / `high` / `critical`. After the scan, the action counts findings at or above that severity (the `blocking-count` output); if any exist, the job fails. The default `none` is report‑only — it never blocks on findings.
+
+```yaml
+- uses: KeygraphHQ/shannon-action@v1
+  with:
+    api-key: ${{ secrets.SHANNON_AI_API_KEY }}
+    target-url: https://staging.example.com
+    fail-on: high        # fail the job on High or Critical findings
+```
+
+To **block a merge**, make this workflow a required check: **Settings → Branches → Branch protection rule → Require status checks to pass**, and select the job.
+
 ## The config file (`.shannon/ci.yml`)
 
 Commit a Shannon config to your repo and the action passes it with `-c`. This scopes the scan so PR runs are fast and cheap — **without it, every run scans all vulnerability classes with exploitation enabled.** Put only non‑secret scoping here (the config does not interpolate environment variables; inject auth secrets at runtime):
