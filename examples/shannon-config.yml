@@ -1,4 +1,4 @@
-# Example Shannon config — commit this to YOUR repo (e.g. as .shannon/ci.yml) and
+# Example Shannon config - commit this to YOUR repo (e.g. as .shannon/ci.yml) and
 # point the action at it with `config-path`. It scopes and steers the scan so CI
 # runs are fast, cheap, and repeatable.
 #
@@ -14,7 +14,7 @@ description: "Storefront web + API, staging environment."
 vuln_classes: [injection, xss, authz]
 
 # Run the exploitation phase? NOTE: this is a STRING, not a boolean.
-#   "false" = analysis only  (faster / cheaper — good default for PRs)
+#   "false" = analysis only  (faster / cheaper - good default for PRs)
 #   "true"  = attempt exploits on confirmed findings
 exploit: "false"
 
@@ -48,7 +48,7 @@ rules:
 report:
   min_severity: high                       # low | medium | high | critical
   min_confidence: medium                   # low | medium | high
-  # sarif: "true"                          # emit a native SARIF log — requires exploit: "true"
+  # sarif: "true"                          # emit a native SARIF log - requires exploit: "true"
   # guidance: |
   #   Drop findings about missing security headers and rate-limit gaps.
 
