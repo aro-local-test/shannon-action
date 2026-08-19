@@ -97,15 +97,14 @@ See the [Shannon configuration reference](https://github.com/KeygraphHQ/shannon)
 | `api-key` | ✅ | — | AI provider API key. Pass from a secret; exported internally as `SHANNON_AI_API_KEY` (provider‑neutral). |
 | `model` |  | Shannon default | Model as `<provider>:<model-id>` (e.g. `anthropic:claude-sonnet-4-6`, `openai:gpt-…`, `xai:…`). Exported as `SHANNON_AI_MODEL`. |
 | `target-url` | ✅ | — | URL of the running target to scan. |
-| `repo-path` |  | `.` | Checked‑out source for whitebox analysis. Run `actions/checkout` first. |
 | `config-path` |  | `.shannon/ci.yml` | Path to the committed Shannon config. Missing file → max‑scope scan (with a warning). |
 | `fail-on` |  | `none` | Fail the job if any finding is ≥ this severity: `none`, `info`, `low`, `medium`, `high`, `critical`. |
 | `pipeline-testing` |  | `false` | Fast smoke test with minimal prompts (no real analysis) — for validating wiring. |
-| `upload-sarif` |  | `true` | Upload SARIF to code scanning. Needs `security-events: write`; degrades gracefully if absent. |
+| `upload-sarif` |  | `true` | Upload Shannon's `report.sarif` to code scanning. Needs `security-events: write` and `report.sarif: "true"` in your Shannon config; skipped with a warning if absent. |
 | `comment-pr` |  | `false` | Upsert a findings comment on the PR. Needs `pull-requests: write` and a `pull_request` event. |
-| `workspace` |  | `ci-<run_id>` | Scan workspace name. |
-| `artifact-name` |  | `shannon-report` | Name of the uploaded report artifact. |
 | `shannon-version` |  | `latest` | Version / dist‑tag of `@keygraph/shannon` to run. |
+
+The scan runs against the checked‑out repository (run `actions/checkout` first) and uses the workflow run id as its workspace — no extra inputs needed. The report artifact is named `shannon-report`.
 
 ## Outputs
 
@@ -115,9 +114,6 @@ See the [Shannon configuration reference](https://github.com/KeygraphHQ/shannon)
 | `findings-count` | Total findings. |
 | `blocking-count` | Findings at/above `fail-on`. |
 | `highest-severity` | Highest severity found (`none` if clean). |
-| `report-path` | Path to the Markdown report. |
-| `report-json` | Path to `report.json`. |
-| `sarif-path` | Path to the generated SARIF file. |
 
 ## Permissions
 
@@ -161,7 +157,7 @@ Shannon sends application source and observed traffic context to an LLM (Anthrop
 
 ## How it works (under the hood)
 
-The action wraps the `@keygraph/shannon` CLI and handles the CI‑specific details for you: it exports your key as `SHANNON_AI_API_KEY` (the CLI's provider‑neutral credential) plus optional `SHANNON_AI_MODEL`, waits for completion by polling the run log directly (robust in ephemeral CI environments, where `shannon logs -f` can hang), converts `report.json` into SARIF, and separates "scan failed" from "findings found" so gating is accurate.
+The action wraps the `@keygraph/shannon` CLI and handles the CI‑specific details for you: it exports your key as `SHANNON_AI_API_KEY` (the CLI's provider‑neutral credential) plus optional `SHANNON_AI_MODEL`, runs the scan with `--follow` so the step blocks until the scan finishes and fails automatically if the scan itself fails, uploads Shannon's native `report.sarif` to code scanning, and applies a separate severity gate from `report.json`.
 
 ## License
 

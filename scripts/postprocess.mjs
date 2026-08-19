@@ -1,20 +1,13 @@
 /**
- * Post-process a finished Shannon run:
- *   - determine pass/fail from workflow.log
- *   - read the structured findings from report.json
- *   - emit a SARIF 2.1.0 file for GitHub code scanning
- *   - write a job-summary table and a PR-comment body
- *   - set step outputs (result, findings-count, blocking-count, highest-severity, paths)
+ * Post-process a finished Shannon run (GitHub): gate math, step outputs, a PR-comment
+ * body, and a job summary. No SARIF is generated — Shannon emits report.sarif natively.
  *
- * This never exits non-zero — the action's "Enforce gate" step owns failing the build,
- * so that SARIF/artifact uploads still run when there are blocking findings.
- *
- * Usage: node postprocess.mjs <runDir> <failOn> <sarifOut>
+ * Usage: node postprocess.mjs <runDir> <failOn>
  */
 import fs from 'node:fs';
 import path from 'node:path';
 
-const [runDir, failOnRaw = 'none', sarifOut] = process.argv.slice(2);
+const [runDir, failOnRaw = 'none'] = process.argv.slice(2);
 const failOn = String(failOnRaw).toLowerCase();
 
 const RANK = { info: 0, informational: 0, none: 0, low: 1, medium: 2, moderate: 2, high: 3, critical: 4 };
@@ -44,19 +37,9 @@ function findFile(root, name) {
 function setOutput(key, value) {
   if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
 }
-
-function sarifLevel(sev) {
-  const r = RANK[sev] ?? 0;
-  if (r >= 3) return 'error';
-  if (r === 2) return 'warning';
-  return 'note';
+function setMultiline(key, value) {
+  if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}<<SHANNON_EOF\n${value}\nSHANNON_EOF\n`);
 }
-
-// GitHub sorts code-scanning alerts by this numeric property.
-function securitySeverity(sev) {
-  return { critical: '9.5', high: '8.0', medium: '5.5', low: '3.0', info: '0.5' }[sev] ?? '0.0';
-}
-
 function httpLocationText(f) {
   if (f.http_location) {
     const { method = '', url = '', parameter } = f.http_location;
@@ -65,14 +48,8 @@ function httpLocationText(f) {
   return f.vulnerable_location || '';
 }
 
-// 1. Outcome from the run log
-const log = findFile(runDir, 'workflow.log');
-const logText = log ? fs.readFileSync(log, 'utf8') : '';
-const result = /^Scan COMPLETED$/m.test(logText) && !/^Scan FAILED$/m.test(logText) ? 'completed' : 'failed';
-
-// 2. Structured findings
+// Findings (with -f, reaching here means the scan ran; result is informational).
 const reportJsonPath = findFile(runDir, 'report.json');
-const humanReport = findFile(runDir, 'Security-Assessment-Report.md');
 let findings = [];
 let meta = {};
 if (reportJsonPath) {
@@ -81,11 +58,11 @@ if (reportJsonPath) {
     findings = Array.isArray(parsed.findings) ? parsed.findings : [];
     meta = parsed.report_meta || {};
   } catch {
-    // leave findings empty
+    // leave empty
   }
 }
+const result = reportJsonPath ? 'completed' : 'failed';
 
-// 3. Counts / gate math
 const counts = Object.fromEntries(ORDER.map((s) => [s, 0]));
 let blocking = 0;
 let highest = 'none';
@@ -97,71 +74,10 @@ for (const f of findings) {
   if (rank > (RANK[highest] ?? -1)) highest = sev;
 }
 
-// 4. SARIF
-const rules = new Map();
-const results = [];
-for (const f of findings) {
-  const sev = String(f.severity || 'info').toLowerCase();
-  const ruleId = f.finding_id || f.category || 'shannon-finding';
-  if (!rules.has(ruleId)) {
-    rules.set(ruleId, {
-      id: ruleId,
-      name: String(f.category || 'Finding').replace(/\s+/g, ''),
-      shortDescription: { text: f.title || ruleId },
-      fullDescription: { text: String(f.overview || f.title || '').slice(0, 1000) },
-      helpUri: 'https://github.com/KeygraphHQ/shannon',
-      properties: {
-        'security-severity': securitySeverity(sev),
-        tags: ['security', f.category].filter(Boolean),
-      },
-    });
-  }
-  const httpText = httpLocationText(f);
-  const entry = {
-    ruleId,
-    level: sarifLevel(sev),
-    message: { text: `${f.title || ruleId}${httpText ? ` — ${httpText}` : ''}` },
-  };
-  const loc = Array.isArray(f.code_locations) ? f.code_locations.find((c) => c && c.file) : undefined;
-  if (loc) {
-    const startLine = Math.max(1, parseInt(loc.start_line ?? loc.line ?? 1, 10) || 1);
-    entry.locations = [
-      {
-        physicalLocation: {
-          artifactLocation: { uri: String(loc.file).replace(/^\.?\//, '') },
-          region: { startLine },
-        },
-      },
-    ];
-  }
-  results.push(entry);
-}
-const sarif = {
-  $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
-  version: '2.1.0',
-  runs: [
-    {
-      tool: {
-        driver: {
-          name: 'Shannon',
-          informationUri: 'https://github.com/KeygraphHQ/shannon',
-          rules: [...rules.values()],
-        },
-      },
-      results,
-    },
-  ],
-};
-let sarifWritten = '';
-if (sarifOut) {
-  fs.writeFileSync(sarifOut, JSON.stringify(sarif, null, 2));
-  sarifWritten = sarifOut;
-}
-
-// 5. Human summary (job summary + PR comment body share the same markdown)
-const badge = result === 'failed' ? '❌ scan failed' : blocking > 0 ? `⛔ ${blocking} blocking` : '✅ passed';
+// Human summary (shared by the job summary and the optional PR comment)
+const badge = blocking > 0 ? `⛔ ${blocking} blocking` : '✅ passed';
 let md = `<!-- shannon-action -->\n## 🛡️ Shannon AI Pentest — ${badge}\n\n`;
-md += `**Target:** ${meta.target || '(unknown)'}  •  **Result:** ${result}  •  **Findings:** ${findings.length}  •  **Highest:** ${highest}\n\n`;
+md += `**Target:** ${meta.target || '(unknown)'}  •  **Findings:** ${findings.length}  •  **Highest:** ${highest}\n\n`;
 md += `| Critical | High | Medium | Low | Info |\n|:-:|:-:|:-:|:-:|:-:|\n| ${counts.critical} | ${counts.high} | ${counts.medium} | ${counts.low} | ${counts.info} |\n\n`;
 if (findings.length) {
   const top = [...findings]
@@ -175,26 +91,14 @@ if (findings.length) {
   }
   md += `\n</details>\n`;
 }
-md += `\n_Full report is attached as a run artifact._\n`;
+md += `\n_Full report is in the run artifact._\n`;
 
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
-if (process.env.RUNNER_TEMP) fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'shannon-comment.md'), md);
 
-// 6. Inline annotations for blocking findings
-for (const f of findings) {
-  const sev = String(f.severity || 'info').toLowerCase();
-  if ((RANK[sev] ?? -1) >= threshold) {
-    console.log(`::error::[${sev}] ${f.finding_id || ''} ${f.title || ''}`);
-  }
-}
-
-// 7. Outputs
 setOutput('result', result);
 setOutput('findings-count', String(findings.length));
 setOutput('blocking-count', String(blocking));
 setOutput('highest-severity', highest);
-setOutput('report-path', humanReport || '');
-setOutput('report-json', reportJsonPath || '');
-setOutput('sarif-path', sarifWritten);
+setMultiline('comment', md);
 
 console.log(`result=${result} findings=${findings.length} blocking(>=${failOn})=${blocking} highest=${highest}`);
