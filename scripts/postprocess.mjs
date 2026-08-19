@@ -1,6 +1,6 @@
 /**
  * Post-process a finished Shannon run (GitHub): gate math, step outputs, a PR-comment
- * body, and a job summary. No SARIF is generated — Shannon emits report.sarif natively.
+ * body, and a job summary. No SARIF is generated - Shannon emits report.sarif natively.
  *
  * Usage: node postprocess.mjs <runDir> <failOn>
  */
@@ -75,9 +75,9 @@ for (const f of findings) {
 }
 
 // Human summary (shared by the job summary and the optional PR comment)
-const badge = blocking > 0 ? `⛔ ${blocking} blocking` : '✅ passed';
-let md = `<!-- shannon-action -->\n## 🛡️ Shannon AI Pentest — ${badge}\n\n`;
-md += `**Target:** ${meta.target || '(unknown)'}  •  **Findings:** ${findings.length}  •  **Highest:** ${highest}\n\n`;
+const badge = blocking > 0 ? `${blocking} blocking` : 'passed';
+let md = `<!-- shannon-action -->\n## Shannon AI Pentest - ${badge}\n\n`;
+md += `**Target:** ${meta.target || '(unknown)'} | **Findings:** ${findings.length} | **Highest:** ${highest}\n\n`;
 md += `| Critical | High | Medium | Low | Info |\n|:-:|:-:|:-:|:-:|:-:|\n| ${counts.critical} | ${counts.high} | ${counts.medium} | ${counts.low} | ${counts.info} |\n\n`;
 if (findings.length) {
   const top = [...findings]
