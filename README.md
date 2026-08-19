@@ -1,10 +1,10 @@
-# Shannon AI Pentest — GitHub Action
+# Shannon AI Pentest - GitHub Action
 
-**AI penetration testing in your CI pipeline.** Point Shannon at a running deployment; it maps the attack surface, analyzes your source, attempts real exploits, and returns findings as SARIF (GitHub code scanning), a PR comment, a job summary, and a full report artifact — and can fail the build on severity.
+**AI penetration testing in your CI pipeline.** Point Shannon at a running deployment; it maps the attack surface, analyzes your source, attempts real exploits, and returns findings as SARIF (GitHub code scanning), a PR comment, a job summary, and a full report artifact - and can fail the build on severity.
 
 Powered by [Shannon](https://github.com/KeygraphHQ/shannon) by [Keygraph](https://keygraph.io).
 
-> ⚠️ Authorized testing only. Run this against applications you own or have explicit permission to test.
+> Authorized testing only. Run this against applications you own or have explicit permission to test.
 
 ---
 
@@ -14,15 +14,15 @@ On each run the action:
 
 1. **Launches Shannon** (`npx @keygraph/shannon`) against your `target-url`, using your checked‑out source for whitebox analysis and a committed config to scope the scan.
 2. **Waits for the scan to finish** and streams progress.
-3. **Publishes results** — uploads SARIF to the **Security** tab, writes a **job summary**, optionally posts a **PR comment**, and always uploads the full report as a **build artifact**.
-4. **Gates the build** — optionally fails the job when findings meet or exceed a severity you choose.
+3. **Publishes results** - uploads SARIF to the **Security** tab, writes a **job summary**, optionally posts a **PR comment**, and always uploads the full report as a **build artifact**.
+4. **Gates the build** - optionally fails the job when findings meet or exceed a severity you choose.
 
 ## Prerequisites
 
-- **A GitHub‑hosted runner** (`ubuntu-latest`) or a self‑hosted runner **with Docker available** — Shannon runs its engine in containers.
-- **An AI provider API key** — Anthropic by default; OpenAI, xAI, Bedrock, or a custom OpenAI‑compatible endpoint via the `model` input — stored as an encrypted repository/organization **secret**.
+- **A GitHub‑hosted runner** (`ubuntu-latest`) or a self‑hosted runner **with Docker available** - Shannon runs its engine in containers.
+- **An AI provider API key** - Anthropic by default; OpenAI, xAI, Bedrock, or a custom OpenAI‑compatible endpoint via the `model` input - stored as an encrypted repository/organization **secret**.
 - **A running target URL** to scan (e.g. a staging or per‑commit preview deployment).
-- **A committed Shannon config** at `.shannon/ci.yml` (recommended — without it, every run is a full max‑scope scan).
+- **A committed Shannon config** at `.shannon/ci.yml` (recommended - without it, every run is a full max‑scope scan).
 
 ## Quick start
 
@@ -48,25 +48,25 @@ jobs:
           api-key: ${{ secrets.SHANNON_AI_API_KEY }}
           target-url: ${{ inputs.target_url }}
           fail-on: critical      # fail the build only on Critical findings
-          # model: anthropic:claude-sonnet-4-6   # optional — <provider>:<model-id>
+          # model: anthropic:claude-sonnet-4-6   # optional - <provider>:<model-id>
 ```
 
 ## Where the findings show up
 
 | Surface | How |
 |---|---|
-| **Security tab** (code scanning) | SARIF upload — needs `permissions: security-events: write`. Each finding links to the exact `file:line`. |
+| **Security tab** (code scanning) | SARIF upload - needs `permissions: security-events: write`. Each finding links to the exact `file:line`. |
 | **Pull‑request comment** | Set `comment-pr: true` and `permissions: pull-requests: write`. The comment is upserted (updated in place) each run. |
-| **Job summary** | Always written — a severity table + top findings on the run page. |
-| **Report artifact** | Always uploaded — the full Markdown report, `report.json`, per‑agent logs, and evidence. |
+| **Job summary** | Always written - a severity table + top findings on the run page. |
+| **Report artifact** | Always uploaded - the full Markdown report, `report.json`, per‑agent logs, and evidence. |
 | **Build status** | Set `fail-on` to fail the job on findings at/above a severity. |
 
 ## Gating
 
 The job fails on **two independent conditions**:
 
-1. **The scan didn't complete.** The scan runs with `--follow`, so the step blocks until the scan finishes and exits non‑zero if the scan itself failed (an infrastructure or agent error — not findings). This fails the job automatically; nothing to configure.
-2. **Findings meet your threshold.** Set `fail-on` to `low` / `medium` / `high` / `critical`. After the scan, the action counts findings at or above that severity (the `blocking-count` output); if any exist, the job fails. The default `none` is report‑only — it never blocks on findings.
+1. **The scan didn't complete.** The scan runs with `--follow`, so the step blocks until the scan finishes and exits non‑zero if the scan itself failed (an infrastructure or agent error - not findings). This fails the job automatically; nothing to configure.
+2. **Findings meet your threshold.** Set `fail-on` to `low` / `medium` / `high` / `critical`. After the scan, the action counts findings at or above that severity (the `blocking-count` output); if any exist, the job fails. The default `none` is report‑only - it never blocks on findings.
 
 ```yaml
 - uses: KeygraphHQ/shannon-action@v1
@@ -80,7 +80,7 @@ To **block a merge**, make this workflow a required check: **Settings → Branch
 
 ## The config file (`.shannon/ci.yml`)
 
-Commit a Shannon config to your repo and the action passes it with `-c`. This scopes the scan so PR runs are fast and cheap — **without it, every run scans all vulnerability classes with exploitation enabled.** Put only non‑secret scoping here (the config does not interpolate environment variables; inject auth secrets at runtime):
+Commit a Shannon config to your repo and the action passes it with `-c`. This scopes the scan so PR runs are fast and cheap - **without it, every run scans all vulnerability classes with exploitation enabled.** Put only non‑secret scoping here (the config does not interpolate environment variables; inject auth secrets at runtime):
 
 ```yaml
 # .shannon/ci.yml
@@ -111,17 +111,17 @@ See the [Shannon configuration reference](https://github.com/KeygraphHQ/shannon)
 
 | Input | Required | Default | Description |
 |---|:--:|---|---|
-| `api-key` | ✅ | — | AI provider API key. Pass from a secret; exported internally as `SHANNON_AI_API_KEY` (provider‑neutral). |
+| `api-key` | | - | AI provider API key. Pass from a secret; exported internally as `SHANNON_AI_API_KEY` (provider‑neutral). |
 | `model` |  | Shannon default | Model as `<provider>:<model-id>` (e.g. `anthropic:claude-sonnet-4-6`, `openai:gpt-…`, `xai:…`). Exported as `SHANNON_AI_MODEL`. |
-| `target-url` | ✅ | — | URL of the running target to scan. |
+| `target-url` | | - | URL of the running target to scan. |
 | `config-path` |  | `.shannon/ci.yml` | Path to the committed Shannon config. Missing file → max‑scope scan (with a warning). |
 | `fail-on` |  | `none` | Fail the job if any finding is ≥ this severity: `none`, `info`, `low`, `medium`, `high`, `critical`. |
-| `pipeline-testing` |  | `false` | Fast smoke test with minimal prompts (no real analysis) — for validating wiring. |
+| `pipeline-testing` |  | `false` | Fast smoke test with minimal prompts (no real analysis) - for validating wiring. |
 | `upload-sarif` |  | `true` | Upload Shannon's `report.sarif` to code scanning. Needs `security-events: write` and `report.sarif: "true"` in your Shannon config; skipped with a warning if absent. |
 | `comment-pr` |  | `false` | Upsert a findings comment on the PR. Needs `pull-requests: write` and a `pull_request` event. |
 | `shannon-version` |  | `latest` | Version / dist‑tag of `@keygraph/shannon` to run. |
 
-The scan runs against the checked‑out repository (run `actions/checkout` first) and uses the workflow run id as its workspace — no extra inputs needed. The report artifact is named `shannon-report`.
+The scan runs against the checked‑out repository (run `actions/checkout` first) and uses the workflow run id as its workspace - no extra inputs needed. The report artifact is named `shannon-report`.
 
 ## Outputs
 
