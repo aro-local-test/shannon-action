@@ -96,9 +96,16 @@ runs:
       if: always()
       shell: bash
       run: |
-        FILE=$(find "$HOME/.shannon/workspaces/$GITHUB_RUN_ID" -name report.sarif 2>/dev/null | head -1)
+        # `find … -print -quit` returns the first match WITHOUT a pipe. Two footguns this avoids,
+        # both under GitHub's default composite bash (`-eo pipefail`):
+        #   1. `find … | head -1` makes find SIGPIPE (141) when head closes the pipe → step fails.
+        #   2. a trailing `[ -z "$FILE" ] && echo …` exits 1 when the file IS found (the success
+        #      case), because the test is false → that non-zero becomes the step's exit code.
+        FILE=$(find "$HOME/.shannon/workspaces/$GITHUB_RUN_ID" -name report.sarif -print -quit 2>/dev/null || true)
         echo "file=$FILE" >> "$GITHUB_OUTPUT"
-        [ -z "$FILE" ] && echo "::warning::No report.sarif found. Enable 'report.sarif: \"true\"' in your Shannon config to publish to code scanning."
+        if [ -z "$FILE" ]; then
+          echo "::warning::No report.sarif found. Enable 'report.sarif: \"true\"' in your Shannon config (exploit runs only) to publish to code scanning."
+        fi
 
     - name: Upload SARIF to code scanning
       if: ${{ always() && inputs.upload-sarif == 'true' && steps.sarif.outputs.file != '' }}
