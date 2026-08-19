@@ -1,5 +1,5 @@
 name: "Shannon AI Pentest"
-description: "AI penetration testing in CI — scan a running target, report exploitable vulnerabilities, and gate the build on severity."
+description: "AI penetration testing in CI: scan a running target, report exploitable vulnerabilities, and gate the build on severity."
 author: "Keygraph"
 
 branding:
@@ -22,7 +22,7 @@ inputs:
     required: false
     default: ".shannon/ci.yml"
   fail-on:
-    description: "Fail the job when any finding is at or above this severity: none | info | low | medium | high | critical."
+    description: "Fail the job when any finding is at or above this severity: none, info, low, medium, high, critical."
     required: false
     default: "none"
   pipeline-testing:
@@ -34,9 +34,17 @@ inputs:
     required: false
     default: "true"
   comment-pr:
-    description: "Post or update a findings-summary comment on the pull request. Requires 'pull-requests: write' and a pull_request event."
+    description: "Post or update an AI-written review comment on the pull request. Requires 'pull-requests: write' and a pull_request event."
     required: false
     default: "false"
+  app-id:
+    description: "GitHub App ID for the Shannon review bot. With app-private-key, the PR comment posts as the app (Shannon[bot]) instead of github-actions[bot]."
+    required: false
+    default: ""
+  app-private-key:
+    description: "Private key (PEM) for the Shannon review GitHub App. Store as an encrypted secret. Used with app-id to post the comment as the app."
+    required: false
+    default: ""
   shannon-version:
     description: "Version or npm dist-tag of @keygraph/shannon to run."
     required: false
@@ -44,7 +52,7 @@ inputs:
 
 outputs:
   result:
-    description: "Scan outcome: completed | failed."
+    description: "Scan outcome: completed or failed."
     value: ${{ steps.analyze.outputs.result }}
   findings-count:
     description: "Total number of findings."
@@ -77,7 +85,7 @@ runs:
         if [ -n "$CONFIG" ]; then
           case "$CONFIG" in /*) : ;; *) CONFIG="$GITHUB_WORKSPACE/$CONFIG" ;; esac
           if [ -f "$CONFIG" ]; then FLAGS+=(-c "$CONFIG"); echo "Using config: $CONFIG"
-          else echo "::warning::No Shannon config at $CONFIG — running at MAX scope."; fi
+          else echo "::warning::No Shannon config at $CONFIG, running at MAX scope."; fi
         fi
         npx --yes "@keygraph/shannon@${{ inputs.shannon-version }}" start \
           -u "${{ inputs.target-url }}" \
@@ -96,11 +104,11 @@ runs:
       if: always()
       shell: bash
       run: |
-        # `find … -print -quit` returns the first match WITHOUT a pipe. Two footguns this avoids,
-        # both under GitHub's default composite bash (`-eo pipefail`):
-        #   1. `find … | head -1` makes find SIGPIPE (141) when head closes the pipe → step fails.
-        #   2. a trailing `[ -z "$FILE" ] && echo …` exits 1 when the file IS found (the success
-        #      case), because the test is false → that non-zero becomes the step's exit code.
+        # find ... -print -quit returns the first match WITHOUT a pipe. Two footguns this avoids,
+        # both under GitHub's default composite bash (-eo pipefail):
+        #   1. find ... | head -1 makes find SIGPIPE (141) when head closes the pipe, failing the step.
+        #   2. a trailing [ -z "$FILE" ] && echo ... exits 1 when the file IS found (the success
+        #      case), because the test is false, and that non-zero becomes the step exit code.
         FILE=$(find "$HOME/.shannon/workspaces/$GITHUB_RUN_ID" -name report.sarif -print -quit 2>/dev/null || true)
         echo "file=$FILE" >> "$GITHUB_OUTPUT"
         if [ -z "$FILE" ]; then
@@ -114,15 +122,47 @@ runs:
       with:
         sarif_file: ${{ steps.sarif.outputs.file }}
 
+    - name: Stage report files
+      if: always()
+      shell: bash
+      run: |
+        RUN="$HOME/.shannon/workspaces/$GITHUB_RUN_ID"
+        OUT="$RUNNER_TEMP/shannon-out"
+        mkdir -p "$OUT"
+        PDF=$(find "$RUN" -name 'Security-Assessment-Report.pdf' -print -quit 2>/dev/null || true)
+        [ -z "$PDF" ] && PDF=$(find "$RUN" -name 'comprehensive_security_assessment_report.pdf' -print -quit 2>/dev/null || true)
+        if [ -n "$PDF" ]; then cp "$PDF" "$OUT/Security-Assessment-Report.pdf"; else echo "::warning::No PDF report found to upload."; fi
+        MD=$(find "$RUN" -name 'Security-Assessment-Report.md' -print -quit 2>/dev/null || true)
+        [ -z "$MD" ] && MD=$(find "$RUN" -name 'comprehensive_security_assessment_report.md' -print -quit 2>/dev/null || true)
+        if [ -n "$MD" ]; then cp "$MD" "$OUT/Security-Assessment-Report.md"; else echo "::warning::No Markdown report found to upload."; fi
+
+    - name: Generate Shannon bot token
+      id: apptoken
+      if: ${{ always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request' && inputs.app-id != '' }}
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+
+    - name: Generate AI review
+      id: aireview
+      if: ${{ always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        SHANNON_AI_API_KEY: ${{ inputs.api-key }}
+        SHANNON_AI_MODEL: ${{ inputs.model }}
+      run: node "${{ github.action_path }}/scripts/ai-review.mjs" "$HOME/.shannon/workspaces/$GITHUB_RUN_ID"
+
     - name: Comment on the pull request
       if: ${{ always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request' }}
       continue-on-error: true
       uses: actions/github-script@v7
       env:
-        COMMENT: ${{ steps.analyze.outputs.comment }}
+        REVIEW: ${{ steps.aireview.outputs.comment }}
       with:
+        github-token: ${{ steps.apptoken.outputs.token || github.token }}
         script: |
-          const body = process.env.COMMENT;
+          const body = process.env.REVIEW;
           if (!body) return;
           const marker = '<!-- shannon-action -->';
           const { data: comments } = await github.rest.issues.listComments({
@@ -132,11 +172,27 @@ runs:
           if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
           else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
 
-    - name: Upload report artifact
+    - name: Upload PDF report
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: shannon-report
+        name: shannon-report-pdf
+        path: ${{ runner.temp }}/shannon-out/Security-Assessment-Report.pdf
+        if-no-files-found: warn
+
+    - name: Upload Markdown report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: shannon-report-md
+        path: ${{ runner.temp }}/shannon-out/Security-Assessment-Report.md
+        if-no-files-found: warn
+
+    - name: Upload full run (zip)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: shannon-report-zip
         path: ~/.shannon/workspaces/${{ github.run_id }}
         include-hidden-files: true
         if-no-files-found: warn
