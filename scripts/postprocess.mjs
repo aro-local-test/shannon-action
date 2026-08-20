@@ -103,10 +103,11 @@ let incompleteReason = '';
 if (!reportJsonPath) {
   incomplete = true;
   incompleteReason = 'no report.json was produced (the scan did not reach the reporting phase)';
-} else if (queued > 0 && findings.length === 0) {
-  incomplete = true;
-  incompleteReason = `${queued} exploit candidate(s) were queued but the report has 0 findings, so the scan was cut off before it finished`;
 }
+// Queued candidates with zero confirmed findings is NOT incomplete: a hardened target legitimately
+// produces exploit candidates that all get dropped as non-exploitable. A genuinely cut-off scan
+// (timeout, cancellation, crash) is caught by the action gate's `steps.scan.outcome != success`
+// check and by a missing report.json above, so it must not be inferred from queued-vs-findings.
 const result = incomplete ? 'failed' : 'completed';
 
 const counts = Object.fromEntries(ORDER.map((s) => [s, 0]));
