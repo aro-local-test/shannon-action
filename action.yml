@@ -29,6 +29,10 @@ inputs:
     description: "Run a fast smoke test with minimal prompts (no real analysis). For validating pipeline wiring only."
     required: false
     default: "false"
+  scan-timeout-minutes:
+    description: "Fail the job if the scan runs longer than this many minutes, so a too-long pentest becomes a clean failure instead of a job cancellation. Empty or 0 disables the internal cap; keep the job's own timeout-minutes a little higher than this."
+    required: false
+    default: ""
   upload-sarif:
     description: "Upload Shannon's SARIF (report.sarif) to GitHub code scanning. Requires 'security-events: write' and report.sarif enabled in your Shannon config."
     required: false
@@ -73,6 +77,7 @@ runs:
         node-version: "22"
 
     - name: Run Shannon scan
+      id: scan
       shell: bash
       env:
         SHANNON_AI_API_KEY: ${{ inputs.api-key }}
@@ -87,11 +92,28 @@ runs:
           if [ -f "$CONFIG" ]; then FLAGS+=(-c "$CONFIG"); echo "Using config: $CONFIG"
           else echo "::warning::No Shannon config at $CONFIG, running at MAX scope."; fi
         fi
-        npx --yes "@keygraph/shannon@${{ inputs.shannon-version }}" start \
-          -u "${{ inputs.target-url }}" \
-          -r "$GITHUB_WORKSPACE" \
-          -w "$GITHUB_RUN_ID" \
-          "${FLAGS[@]}"
+        # A scan that runs past scan-timeout-minutes is terminated and this step fails (exit 1),
+        # so a too-long pentest is a clean failure rather than a job cancellation that a later step
+        # might misread as a pass. Empty or 0 disables the internal cap.
+        TMIN="${{ inputs.scan-timeout-minutes }}"
+        set +e
+        if [ -n "$TMIN" ] && [ "$TMIN" != "0" ]; then
+          timeout "${TMIN}m" npx --yes "@keygraph/shannon@${{ inputs.shannon-version }}" start \
+            -u "${{ inputs.target-url }}" -r "$GITHUB_WORKSPACE" -w "$GITHUB_RUN_ID" "${FLAGS[@]}"
+        else
+          npx --yes "@keygraph/shannon@${{ inputs.shannon-version }}" start \
+            -u "${{ inputs.target-url }}" -r "$GITHUB_WORKSPACE" -w "$GITHUB_RUN_ID" "${FLAGS[@]}"
+        fi
+        code=$?
+        set -e
+        if [ "$code" -ne 0 ]; then
+          if [ "$code" -eq 124 ]; then
+            echo "::error::Shannon scan exceeded ${TMIN} minutes and was terminated. Failing the job (a partial scan is not a pass)."
+          else
+            echo "::error::Shannon scan failed (exit ${code})."
+          fi
+          exit 1
+        fi
 
     - name: Analyze results
       id: analyze
@@ -202,6 +224,17 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # A partial scan (timeout, cancellation, crash, or an incomplete report) must never be
+        # treated as a pass. Fail if the scan step did not succeed or the report is incomplete,
+        # before evaluating findings.
+        if [ "${{ steps.scan.outcome }}" != "success" ]; then
+          echo "::error::Shannon scan step did not succeed (outcome=${{ steps.scan.outcome }}); failing the job."
+          exit 1
+        fi
+        if [ "${{ steps.analyze.outputs.result }}" != "completed" ]; then
+          echo "::error::Shannon scan did not complete cleanly (result=${{ steps.analyze.outputs.result }}); failing the job."
+          exit 1
+        fi
         BLOCKING="${{ steps.analyze.outputs.blocking-count }}"
         if [ "${{ inputs.fail-on }}" != "none" ] && [ "${BLOCKING:-0}" -gt 0 ]; then
           echo "::error::${BLOCKING} finding(s) at or above severity '${{ inputs.fail-on }}'."
