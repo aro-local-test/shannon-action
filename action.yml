@@ -1,4 +1,4 @@
-name: "Shannon AI Pentest (aro-local-test)"
+name: "Shannon AI Pentest"
 description: "AI penetration testing in CI: scan a running target, report exploitable vulnerabilities, and gate the build on severity."
 author: "Keygraph"
 
@@ -82,27 +82,45 @@ runs:
       env:
         SHANNON_AI_API_KEY: ${{ inputs.api-key }}
         SHANNON_AI_MODEL: ${{ inputs.model }}
+        # User-controlled inputs are passed via env and read as quoted shell variables, never
+        # spliced into the script text, so a value like http://x$(cmd) cannot execute commands.
+        INPUT_TARGET_URL: ${{ inputs.target-url }}
+        INPUT_CONFIG_PATH: ${{ inputs.config-path }}
+        INPUT_SHANNON_VERSION: ${{ inputs.shannon-version }}
+        INPUT_SCAN_TIMEOUT: ${{ inputs.scan-timeout-minutes }}
+        INPUT_PIPELINE_TESTING: ${{ inputs.pipeline-testing }}
       run: |
         set -euo pipefail
         FLAGS=(-f)   # --follow: block until the scan finishes; exit non-zero if the scan fails
-        [ "${{ inputs.pipeline-testing }}" = "true" ] && FLAGS+=(--pipeline-testing)
-        CONFIG="${{ inputs.config-path }}"
+        [ "$INPUT_PIPELINE_TESTING" = "true" ] && FLAGS+=(--pipeline-testing)
+        CONFIG="$INPUT_CONFIG_PATH"
         if [ -n "$CONFIG" ]; then
           case "$CONFIG" in /*) : ;; *) CONFIG="$GITHUB_WORKSPACE/$CONFIG" ;; esac
           if [ -f "$CONFIG" ]; then FLAGS+=(-c "$CONFIG"); echo "Using config: $CONFIG"
           else echo "::warning::No Shannon config at $CONFIG, running at MAX scope."; fi
         fi
-        # A scan that runs past scan-timeout-minutes is terminated and this step fails (exit 1),
-        # so a too-long pentest is a clean failure rather than a job cancellation that a later step
-        # might misread as a pass. Empty or 0 disables the internal cap.
-        TMIN="${{ inputs.scan-timeout-minutes }}"
-        set +e
+        # Optional internal cap: a scan past scan-timeout-minutes is terminated and this step fails
+        # (exit 1), so a too-long pentest is a clean failure, not a job cancellation a later step
+        # might misread as a pass. Empty or 0 disables it.
+        TMIN="$INPUT_SCAN_TIMEOUT"
+        TIMEOUT_BIN=""
         if [ -n "$TMIN" ] && [ "$TMIN" != "0" ]; then
-          timeout "${TMIN}m" npx --yes "@keygraph/shannon@${{ inputs.shannon-version }}" start \
-            -u "${{ inputs.target-url }}" -r "$GITHUB_WORKSPACE" -w "$GITHUB_RUN_ID" "${FLAGS[@]}"
+          if ! [[ "$TMIN" =~ ^[0-9]+$ ]]; then
+            echo "::error::scan-timeout-minutes must be a whole number of minutes, got '$TMIN'."
+            exit 1
+          fi
+          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+          if [ -z "$TIMEOUT_BIN" ]; then
+            echo "::warning::No 'timeout' binary on this runner (on macOS install coreutils for gtimeout); running without the internal cap."
+          fi
+        fi
+        set +e
+        if [ -n "$TIMEOUT_BIN" ]; then
+          "$TIMEOUT_BIN" "${TMIN}m" npx --yes "@keygraph/shannon@${INPUT_SHANNON_VERSION}" start \
+            -u "$INPUT_TARGET_URL" -r "$GITHUB_WORKSPACE" -w "$GITHUB_RUN_ID" "${FLAGS[@]}"
         else
-          npx --yes "@keygraph/shannon@${{ inputs.shannon-version }}" start \
-            -u "${{ inputs.target-url }}" -r "$GITHUB_WORKSPACE" -w "$GITHUB_RUN_ID" "${FLAGS[@]}"
+          npx --yes "@keygraph/shannon@${INPUT_SHANNON_VERSION}" start \
+            -u "$INPUT_TARGET_URL" -r "$GITHUB_WORKSPACE" -w "$GITHUB_RUN_ID" "${FLAGS[@]}"
         fi
         code=$?
         set -e
@@ -119,7 +137,9 @@ runs:
       id: analyze
       if: always()
       shell: bash
-      run: node "${{ github.action_path }}/scripts/postprocess.mjs" "$HOME/.shannon/workspaces/$GITHUB_RUN_ID" "${{ inputs.fail-on }}"
+      env:
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+      run: node "${{ github.action_path }}/scripts/postprocess.mjs" "$HOME/.shannon/workspaces/$GITHUB_RUN_ID" "$INPUT_FAIL_ON"
 
     - name: Locate Shannon SARIF
       id: sarif
@@ -145,10 +165,12 @@ runs:
         sarif_file: ${{ steps.sarif.outputs.file }}
 
     - name: Stage report files
+      id: stage
       if: always()
       shell: bash
       run: |
         RUN="$HOME/.shannon/workspaces/$GITHUB_RUN_ID"
+        echo "run-dir=$RUN" >> "$GITHUB_OUTPUT"
         OUT="$RUNNER_TEMP/shannon-out"
         mkdir -p "$OUT"
         PDF=$(find "$RUN" -name 'Security-Assessment-Report.pdf' -print -quit 2>/dev/null || true)
@@ -160,7 +182,8 @@ runs:
 
     - name: Generate Shannon bot token
       id: apptoken
-      if: ${{ always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request' && inputs.app-id != '' }}
+      if: ${{ always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request' && inputs.app-id != '' && inputs.app-private-key != '' }}
+      continue-on-error: true
       uses: actions/create-github-app-token@v1
       with:
         app-id: ${{ inputs.app-id }}
@@ -169,6 +192,7 @@ runs:
     - name: Generate AI review
       id: aireview
       if: ${{ always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request' }}
+      continue-on-error: true
       shell: bash
       env:
         SHANNON_AI_API_KEY: ${{ inputs.api-key }}
@@ -215,29 +239,34 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: shannon-report-zip
-        path: ~/.shannon/workspaces/${{ github.run_id }}
+        path: ${{ steps.stage.outputs.run-dir }}
         include-hidden-files: true
         if-no-files-found: warn
 
     - name: Enforce severity gate
       if: always()
       shell: bash
+      env:
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        SCAN_OUTCOME: ${{ steps.scan.outcome }}
+        ANALYZE_RESULT: ${{ steps.analyze.outputs.result }}
+        BLOCKING_COUNT: ${{ steps.analyze.outputs.blocking-count }}
       run: |
         set -euo pipefail
         # A partial scan (timeout, cancellation, crash, or an incomplete report) must never be
         # treated as a pass. Fail if the scan step did not succeed or the report is incomplete,
         # before evaluating findings.
-        if [ "${{ steps.scan.outcome }}" != "success" ]; then
-          echo "::error::Shannon scan step did not succeed (outcome=${{ steps.scan.outcome }}); failing the job."
+        if [ "$SCAN_OUTCOME" != "success" ]; then
+          echo "::error::Shannon scan step did not succeed (outcome=$SCAN_OUTCOME); failing the job."
           exit 1
         fi
-        if [ "${{ steps.analyze.outputs.result }}" != "completed" ]; then
-          echo "::error::Shannon scan did not complete cleanly (result=${{ steps.analyze.outputs.result }}); failing the job."
+        if [ "$ANALYZE_RESULT" != "completed" ]; then
+          echo "::error::Shannon scan did not complete cleanly (result=$ANALYZE_RESULT); failing the job."
           exit 1
         fi
-        BLOCKING="${{ steps.analyze.outputs.blocking-count }}"
-        if [ "${{ inputs.fail-on }}" != "none" ] && [ "${BLOCKING:-0}" -gt 0 ]; then
-          echo "::error::${BLOCKING} finding(s) at or above severity '${{ inputs.fail-on }}'."
+        BLOCKING="${BLOCKING_COUNT:-0}"
+        if [ "$INPUT_FAIL_ON" != "none" ] && [ "$BLOCKING" -gt 0 ]; then
+          echo "::error::${BLOCKING} finding(s) at or above severity '$INPUT_FAIL_ON'."
           exit 1
         fi
-        echo "Severity gate passed (blocking=${BLOCKING:-0})."
+        echo "Severity gate passed (blocking=${BLOCKING})."
