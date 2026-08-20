@@ -4,15 +4,39 @@
  *
  * Usage: node postprocess.mjs <runDir> <failOn>
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
 const [runDir, failOnRaw = 'none'] = process.argv.slice(2);
-const failOn = String(failOnRaw).toLowerCase();
+const failOn = String(failOnRaw).trim().toLowerCase();
 
-const RANK = { info: 0, informational: 0, none: 0, low: 1, medium: 2, moderate: 2, high: 3, critical: 4 };
-const threshold = failOn === 'none' ? Infinity : (RANK[failOn] ?? Infinity);
+const RANK = { none: 0, info: 0, informational: 0, low: 1, medium: 2, moderate: 2, high: 3, critical: 4 };
 const ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+
+// Fail loud on an unknown fail-on rather than silently disabling the gate. A typo or a stray space
+// would otherwise make the threshold Infinity, so nothing counts as blocking and the gate passes.
+if (!(failOn in RANK)) {
+  console.log(`::error::Invalid fail-on value '${failOnRaw}'. Use one of: none, info, low, medium, high, critical.`);
+  process.exit(1);
+}
+const threshold = failOn === 'none' ? Infinity : RANK[failOn];
+
+// Collapse severity synonyms to canonical buckets so the counts table and the gate agree.
+function canonicalSeverity(raw) {
+  const s = String(raw || 'info').trim().toLowerCase();
+  if (s === 'moderate') return 'medium';
+  if (s === 'informational' || s === 'none' || s === '') return 'info';
+  return s;
+}
+
+// Strip characters that would break the markdown table or the GITHUB_OUTPUT block. Finding fields
+// are model output derived from the scanned target, so they are untrusted here.
+function clean(value) {
+  return String(value ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\|/g, '\\|');
+}
 
 function findFile(root, name) {
   if (!root || !fs.existsSync(root)) return undefined;
@@ -35,11 +59,23 @@ function findFile(root, name) {
 }
 
 function setOutput(key, value) {
-  if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
+  if (process.env.GITHUB_OUTPUT) {
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${String(value).replace(/[\r\n]/g, ' ')}\n`);
+  }
 }
+
 function setMultiline(key, value) {
-  if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}<<SHANNON_EOF\n${value}\nSHANNON_EOF\n`);
+  if (!process.env.GITHUB_OUTPUT) return;
+  // Random, unguessable delimiter so finding content cannot forge a delimiter line and inject
+  // further outputs (which, with last-write-wins, could override the gate values).
+  const delim = `SHANNON_EOF_${crypto.randomBytes(16).toString('hex')}`;
+  const safe = String(value)
+    .split('\n')
+    .filter((line) => line.trim() !== delim)
+    .join('\n');
+  fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}<<${delim}\n${safe}\n${delim}\n`);
 }
+
 function httpLocationText(f) {
   if (f.http_location) {
     const { method = '', url = '', parameter } = f.http_location;
@@ -79,42 +115,41 @@ function countQueuedExploits(root) {
   return total;
 }
 
-// Findings. With -f, reaching here means the scan ran, but a scan cut off by a job timeout can
-// still leave a partial report.json with an empty findings array. That must never read as a pass.
+// Findings. A report.json that is missing or corrupt must never read as a clean pass.
 const reportJsonPath = findFile(runDir, 'report.json');
 let findings = [];
 let meta = {};
+let parseFailed = false;
 if (reportJsonPath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(reportJsonPath, 'utf8'));
     findings = Array.isArray(parsed.findings) ? parsed.findings : [];
     meta = parsed.report_meta || {};
   } catch {
-    // leave empty
+    parseFailed = true;
   }
 }
 
-// Completeness check. If exploit candidates were queued but the report has zero findings, the
-// exploitation or reporting phase did not finish (typically a timeout): the report is incomplete
-// and the run must fail rather than be reported as clean.
 const queued = countQueuedExploits(runDir);
 let incomplete = false;
 let incompleteReason = '';
 if (!reportJsonPath) {
   incomplete = true;
   incompleteReason = 'no report.json was produced (the scan did not reach the reporting phase)';
+} else if (parseFailed) {
+  incomplete = true;
+  incompleteReason = 'report.json was produced but is corrupt or unparseable';
 }
 // Queued candidates with zero confirmed findings is NOT incomplete: a hardened target legitimately
-// produces exploit candidates that all get dropped as non-exploitable. A genuinely cut-off scan
-// (timeout, cancellation, crash) is caught by the action gate's `steps.scan.outcome != success`
-// check and by a missing report.json above, so it must not be inferred from queued-vs-findings.
+// produces exploit candidates that all get dropped as non-exploitable. A genuinely cut-off scan is
+// caught by the action gate's `steps.scan.outcome != success` check and by the checks above.
 const result = incomplete ? 'failed' : 'completed';
 
 const counts = Object.fromEntries(ORDER.map((s) => [s, 0]));
 let blocking = 0;
 let highest = 'none';
 for (const f of findings) {
-  const sev = String(f.severity || 'info').toLowerCase();
+  const sev = canonicalSeverity(f.severity);
   if (sev in counts) counts[sev]++;
   const rank = RANK[sev] ?? -1;
   if (rank >= threshold) blocking++;
@@ -124,21 +159,20 @@ for (const f of findings) {
 // Human summary (shared by the job summary and the optional PR comment)
 const badge = blocking > 0 ? `${blocking} blocking` : 'passed';
 let md = `<!-- shannon-action -->\n## Shannon AI Pentest - ${badge}\n\n`;
-md += `**Target:** ${meta.target || '(unknown)'} | **Findings:** ${findings.length} | **Highest:** ${highest}\n\n`;
+md += `**Target:** ${clean(meta.target) || '(unknown)'} | **Findings:** ${findings.length} | **Highest:** ${highest}\n\n`;
 md += `| Critical | High | Medium | Low | Info |\n|:-:|:-:|:-:|:-:|:-:|\n| ${counts.critical} | ${counts.high} | ${counts.medium} | ${counts.low} | ${counts.info} |\n\n`;
 if (findings.length) {
   const top = [...findings]
-    .sort((a, b) => (RANK[String(b.severity).toLowerCase()] ?? -1) - (RANK[String(a.severity).toLowerCase()] ?? -1))
+    .sort((a, b) => (RANK[canonicalSeverity(b.severity)] ?? -1) - (RANK[canonicalSeverity(a.severity)] ?? -1))
     .slice(0, 20);
   md += `<details><summary>Top findings (${Math.min(findings.length, 20)} of ${findings.length})</summary>\n\n`;
   md += `| Severity | ID | Title | Location |\n|---|---|---|---|\n`;
   for (const f of top) {
-    const esc = (s) => String(s || '').replace(/\|/g, '\\|');
-    md += `| ${esc(f.severity)} | ${esc(f.finding_id)} | ${esc(f.title)} | ${esc(httpLocationText(f))} |\n`;
+    md += `| ${clean(f.severity)} | ${clean(f.finding_id)} | ${clean(f.title)} | ${clean(httpLocationText(f))} |\n`;
   }
   md += `\n</details>\n`;
 }
-md += `\n_Full report is in the run artifact._\n`;
+md += `\n_Full report is in the run artifacts._\n`;
 
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
 
