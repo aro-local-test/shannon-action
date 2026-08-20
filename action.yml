@@ -1,4 +1,4 @@
-name: "Shannon AI Pentest"
+name: "Shannon AI Pentest (aro-local-test)"
 description: "AI penetration testing in CI: scan a running target, report exploitable vulnerabilities, and gate the build on severity."
 author: "Keygraph"
 
