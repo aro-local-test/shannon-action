@@ -48,7 +48,39 @@ function httpLocationText(f) {
   return f.vulnerable_location || '';
 }
 
-// Findings (with -f, reaching here means the scan ran; result is informational).
+// Count exploit candidates the vulnerability agents queued for the exploitation phase.
+function countQueuedExploits(root) {
+  if (!root || !fs.existsSync(root)) return 0;
+  let total = 0;
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        stack.push(p);
+      } else if (/_exploitation_queue\.json$/.test(e.name)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+          const list = Array.isArray(data) ? data : data.vulnerabilities || data.queue || [];
+          if (Array.isArray(list)) total += list.length;
+        } catch {
+          // ignore unparseable queue files
+        }
+      }
+    }
+  }
+  return total;
+}
+
+// Findings. With -f, reaching here means the scan ran, but a scan cut off by a job timeout can
+// still leave a partial report.json with an empty findings array. That must never read as a pass.
 const reportJsonPath = findFile(runDir, 'report.json');
 let findings = [];
 let meta = {};
@@ -61,7 +93,21 @@ if (reportJsonPath) {
     // leave empty
   }
 }
-const result = reportJsonPath ? 'completed' : 'failed';
+
+// Completeness check. If exploit candidates were queued but the report has zero findings, the
+// exploitation or reporting phase did not finish (typically a timeout): the report is incomplete
+// and the run must fail rather than be reported as clean.
+const queued = countQueuedExploits(runDir);
+let incomplete = false;
+let incompleteReason = '';
+if (!reportJsonPath) {
+  incomplete = true;
+  incompleteReason = 'no report.json was produced (the scan did not reach the reporting phase)';
+} else if (queued > 0 && findings.length === 0) {
+  incomplete = true;
+  incompleteReason = `${queued} exploit candidate(s) were queued but the report has 0 findings, so the scan was cut off before it finished`;
+}
+const result = incomplete ? 'failed' : 'completed';
 
 const counts = Object.fromEntries(ORDER.map((s) => [s, 0]));
 let blocking = 0;
@@ -99,6 +145,12 @@ setOutput('result', result);
 setOutput('findings-count', String(findings.length));
 setOutput('blocking-count', String(blocking));
 setOutput('highest-severity', highest);
+setOutput('scan-complete', incomplete ? 'false' : 'true');
 setMultiline('comment', md);
 
-console.log(`result=${result} findings=${findings.length} blocking(>=${failOn})=${blocking} highest=${highest}`);
+if (incomplete) {
+  console.log(`::error::Shannon scan is incomplete: ${incompleteReason}.`);
+}
+console.log(
+  `result=${result} scan-complete=${!incomplete} findings=${findings.length} queued=${queued} blocking(>=${failOn})=${blocking} highest=${highest}`,
+);
